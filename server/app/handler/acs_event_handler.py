@@ -94,9 +94,33 @@ class AcsEventHandler:
                 logger.info(
                     "Answered call for connection id: %s", result.call_connection_id
                 )
+
+                # Bridge call_connection_id to shared demo state for transfer
+                demo_state = config.get("DEMO_CALL_STATE", {})
+                demo_state["call_connection_id"] = result.call_connection_id
+                demo_state["context_id"] = str(guid)
+
                 return Response(status=200)
 
         return Response(status=400)
+
+    async def demo_transfer_call(self, call_connection_id: str, target: str) -> dict:
+        """Transfers an active call to target phone number (demo use)."""
+        try:
+            from azure.communication.callautomation import PhoneNumberIdentifier
+
+            call_connection = self.acs_client.get_call_connection(call_connection_id)
+            await call_connection.transfer_call_to_participant(
+                target_participant=PhoneNumberIdentifier(target)
+            )
+            logger.info(
+                "Transfer initiated: call_connection_id=%s target=%s",
+                call_connection_id, target,
+            )
+            return {"status": "initiated", "target": target}
+        except Exception as e:
+            logger.error("Transfer failed: %s", e)
+            return {"status": "failed", "reason": str(e)}
 
     async def process_callback_events(self, context_id: str, raw_events: list, config):
         """Processes ACS callback events such as call connected, media started, etc."""
@@ -165,6 +189,14 @@ class AcsEventHandler:
             elif event["type"] == "Microsoft.Communication.CallDisconnected":
                 logger.info(
                     "CallDisconnected event received for: %s", call_connection_id
+                )
+
+            elif event["type"] == "Microsoft.Communication.CallTransferAccepted":
+                logger.info("Transfer accepted for: %s", call_connection_id)
+
+            elif event["type"] == "Microsoft.Communication.CallTransferFailed":
+                logger.warning(
+                    "Transfer FAILED for: %s  %s", call_connection_id, event_data
                 )
 
         return Response(status=200)

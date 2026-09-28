@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import uuid
 from typing import Optional
 
@@ -19,13 +20,50 @@ logger = logging.getLogger(__name__)
 # Default chunk size in bytes (100ms of audio at 24kHz, 16-bit mono)
 DEFAULT_CHUNK_SIZE = 4800  # 24000 samples/sec * 0.1 sec * 2 bytes
 
+# Transfer detection: match the AI's spoken phrase "I will transfer you to <Dept> now."
+TRANSFER_PATTERN = re.compile(r"i will transfer you to (.+?) now", re.IGNORECASE)
+
 
 def session_config():
     """Returns the default session configuration for Voice Live."""
     return {
         "type": "session.update",
         "session": {
-            "instructions": "You are a helpful AI assistant responding in natural, engaging language.",
+            "instructions": (
+                "You are the County Services IVR assistant. Your job is to greet callers, "
+                "understand who or what department they need, confirm the correct department "
+                "with them, and transfer them.\n\n"
+                "Follow this exact flow:\n"
+                "1. Greet: \"Thank you for calling County Services. I can help direct your call. "
+                "Who or what department are you trying to reach today?\"\n"
+                "2. Listen to the caller and identify the best matching department from this list:\n"
+                "   - Administration (official county records and administrative processes only "
+                "\u2014 NOT a general information line)\n"
+                "   - County Executive Office (matters specifically for the County Executive "
+                "\u2014 NOT a general county information line)\n"
+                "   - Public Works (roads, potholes, utilities, sanitation, permits)\n"
+                "   - Health Services (clinics, public health, medical assistance)\n"
+                "   - Human Services (social services, benefits, financial assistance)\n"
+                "   - Clerk / Recorder (official records, filing, marriage/birth certificates)\n"
+                "   - Sheriff / Public Safety (law enforcement, non-emergency safety)\n"
+                "3. If the caller's need is unclear, ask one clarifying question: "
+                "\"Can you tell me a little more about what you need help with?\"\n"
+                "4. Confirm: \"I can connect you to [Department Name]. Does that sound right?\"\n"
+                "5. When the caller confirms, say exactly: "
+                "\"I will transfer you to [Department Name] now.\" then stop speaking.\n\n"
+                "Important rules:\n"
+                "- Never route to Administration for general questions or complaints. If a caller "
+                "says \"Administration\" without a clear administrative reason, ask what the issue "
+                "is about before routing there.\n"
+                "- Never route to the County Executive Office for general inquiries. That office "
+                "handles matters specifically directed at the County Executive. If the caller "
+                "sounds like they want general county information, ask what the issue is about.\n"
+                "- If truly ambiguous after one clarification, say: "
+                "\"I will transfer you to the General Operator now.\"\n"
+                "- Always end a confirmed transfer with the exact phrase: "
+                "\"I will transfer you to [Department Name] now.\" "
+                "This phrase triggers the transfer action \u2014 do not vary the wording."
+            ),
             "turn_detection": {
                 "type": "azure_semantic_vad",
                 "threshold": 0.3,
@@ -79,6 +117,13 @@ class ACSMediaHandler:
                 self._ambient_mixer = AmbientMixer(preset=ambient_preset)
             except Exception as e:
                 logger.error(f"Failed to initialize AmbientMixer: {e}")
+
+        # IVR demo call state (shared dict bridged from server.py)
+        self.call_state = config.get("DEMO_CALL_STATE", {})
+        self.demo_mode = config.get("DEMO_MODE", False)
+        self.demo_transfer_number = config.get("DEMO_TRANSFER_NUMBER", "")
+        self.demo_web_simulate = config.get("DEMO_WEB_SIMULATE_TRANSFER", True)
+        self.acs_connection_string = config.get("ACS_CONNECTION_STRING", "")
 
     def _generate_guid(self):
         return str(uuid.uuid4())
@@ -187,6 +232,13 @@ class ACSMediaHandler:
                             json.dumps({"Kind": "Transcription", "Text": transcript})
                         )
 
+                        # IVR transfer detection
+                        if self.demo_mode and transcript:
+                            match = TRANSFER_PATTERN.search(transcript)
+                            if match:
+                                department = match.group(1).strip()
+                                await self._handle_transfer(department)
+
                     case "response.audio.delta":
                         delta = event.get("delta")
                         audio_bytes = base64.b64decode(delta)
@@ -222,6 +274,56 @@ class ACSMediaHandler:
                         )
         except Exception:
             logger.exception("[VoiceLiveACSHandler] Receiver loop error")
+
+    async def _handle_transfer(self, department: str):
+        """Handles transfer after the AI announces a department routing."""
+        if self.is_raw_audio and self.demo_web_simulate:
+            # Web client path: send simulated transfer event
+            logger.info("ROUTING: department=%s mode=simulated", department)
+            self.call_state["intent"] = department
+            self.call_state["transfer_status"] = "simulated"
+            await self.send_message(
+                json.dumps({
+                    "Kind": "TransferSimulated",
+                    "Department": department,
+                    "Status": "success",
+                })
+            )
+        elif not self.is_raw_audio:
+            # ACS phone path: execute real transfer
+            call_connection_id = self.call_state.get("call_connection_id")
+            if not call_connection_id:
+                logger.error("ROUTING: No call_connection_id available for transfer")
+                return
+            target = self.demo_transfer_number
+            logger.info(
+                "ROUTING: department=%s mode=live target=%s", department, target
+            )
+            self.call_state["intent"] = department
+            result = await self._transfer_call(call_connection_id, target)
+            self.call_state["transfer_status"] = result.get("status", "unknown")
+
+    async def _transfer_call(self, call_connection_id: str, target: str) -> dict:
+        """Executes an ACS call transfer to the target phone number."""
+        try:
+            from azure.communication.callautomation import PhoneNumberIdentifier
+            from azure.communication.callautomation.aio import CallAutomationClient
+
+            acs_client = CallAutomationClient.from_connection_string(
+                self.acs_connection_string
+            )
+            call_connection = acs_client.get_call_connection(call_connection_id)
+            await call_connection.transfer_call_to_participant(
+                target_participant=PhoneNumberIdentifier(target)
+            )
+            logger.info(
+                "Transfer initiated: call_connection_id=%s target=%s",
+                call_connection_id, target,
+            )
+            return {"status": "initiated", "target": target}
+        except Exception as e:
+            logger.error("Transfer failed: %s", e)
+            return {"status": "failed", "reason": str(e)}
 
     async def send_message(self, message: Data):
         """Sends data back to client WebSocket."""

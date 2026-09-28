@@ -15,13 +15,14 @@ class RingBufferProcessor extends AudioWorkletProcessor {
   }
 
   process(_, outputs) {
-    const out = outputs[0][0];
+    const output = outputs[0];
+    if (!output || output.length === 0) return true;
+    const out = output[0];
     if (this.buffer.length >= out.length) {
       out.set(this.buffer.subarray(0, out.length));
       this.buffer = this.buffer.subarray(out.length);
     } else {
-      out.fill(0);
-      this.buffer = new Float32Array(0);
+      out.fill(0); // Underflow: output silence for this frame, but RETAIN this.buffer for next packet!
     }
     return true;
   }

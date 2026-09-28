@@ -1,0 +1,71 @@
+## IVR Demo Container App — acs-smecpocaiccas-demo-3cfyc
+## This YAML defines the new demo ACA. It mirrors the existing ca-smecpocaiccas-3cfyc
+## but adds IVR demo env vars (DEMO_MODE, DEMO_TRANSFER_NUMBER, DEMO_WEB_SIMULATE_TRANSFER).
+## DO NOT apply this to the existing ACA.
+##
+## Apply with:
+##   az containerapp create --name acs-smecpocaiccas-demo-3cfyc \
+##     --resource-group rg-smecpocaiccas-3cfyc \
+##     --yaml infra/demo-containerapp.yaml
+
+properties:
+  managedEnvironmentId: /subscriptions/941e8603-33bc-46b1-bbae-1a35a75a8efc/resourceGroups/rg-smecpocaiccas-3cfyc/providers/Microsoft.App/managedEnvironments/cae-smecpocaiccas-3cfyc
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      external: true
+      targetPort: 8000
+      transport: auto
+      allowInsecure: false
+    registries:
+      - server: smecpocaiccas3cfyc.azurecr.io
+        identity: /subscriptions/941e8603-33bc-46b1-bbae-1a35a75a8efc/resourceGroups/rg-smecpocaiccas-3cfyc/providers/Microsoft.ManagedIdentity/userAssignedIdentities/smecpocaiccas-3cfyc-id
+    secrets:
+      - name: acs-connection-string
+        value: "<set via CLI --secrets flag>"
+      - name: azure-voice-live-api-key
+        value: "<set via CLI --secrets flag>"
+  template:
+    containers:
+      - name: main
+        image: smecpocaiccas3cfyc.azurecr.io/voice-live-agent/app-smecpocaiccas:fix-20260928
+        resources:
+          cpu: 2
+          memory: 4Gi
+        env:
+          - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+            value: "<set via CLI or portal>"
+          # --- Existing env vars (matching production ACA) ---
+          - name: AZURE_VOICE_LIVE_ENDPOINT
+            value: "https://saif-content-understanding.cognitiveservices.azure.com/"
+          - name: AZURE_CLIENT_ID
+            value: "6d585fa1-5681-4ad4-8003-4d80f8496a51"
+          - name: AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID
+            value: "6d585fa1-5681-4ad4-8003-4d80f8496a51"
+          - name: VOICE_LIVE_MODEL
+            value: "gpt-4.1"
+          - name: ACS_CONNECTION_STRING
+            secretRef: acs-connection-string
+          - name: AZURE_VOICE_LIVE_API_KEY
+            secretRef: azure-voice-live-api-key
+          - name: DEBUG_MODE
+            value: "true"
+          # --- IVR Demo env vars ---
+          - name: DEMO_MODE
+            value: "true"
+          - name: DEMO_TRANSFER_NUMBER
+            value: "+19453821555"
+          - name: DEMO_WEB_SIMULATE_TRANSFER
+            value: "true"
+    scale:
+      minReplicas: 1
+      maxReplicas: 10
+      rules:
+        - name: http-scaler
+          http:
+            metadata:
+              concurrentRequests: "100"
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    /subscriptions/941e8603-33bc-46b1-bbae-1a35a75a8efc/resourceGroups/rg-smecpocaiccas-3cfyc/providers/Microsoft.ManagedIdentity/userAssignedIdentities/smecpocaiccas-3cfyc-id: {}

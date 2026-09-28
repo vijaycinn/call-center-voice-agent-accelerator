@@ -76,6 +76,17 @@
       font-size: 0.85rem;
       color: #666;
     }
+
+    #transferPanel {
+      display: none;
+      margin-top: 1.5rem;
+      padding: 1rem 1.5rem;
+      background: #e6f4ea;
+      border: 1px solid #34a853;
+      border-radius: 0.5rem;
+      font-size: 1rem;
+      color: #1e7e34;
+    }
   </style>
 </head>
 <body>
@@ -93,6 +104,8 @@
 
   <!-- Ambient Scene: Backend handles ambient mixing via AMBIENT_PRESET env var -->
 
+  <div id="transferPanel"></div>
+
   <audio id="ttsPlayer" autoplay></audio>
 
   <footer>
@@ -103,6 +116,7 @@
     let mediaStream, source, processor, socket;
     let audioContext = new AudioContext({ sampleRate: 24000 });
     let workletNode;
+    let pendingPcmByte = null;
 
     // Load the AudioWorkletProcessor
     async function loadAudioProcessor() {
@@ -113,7 +127,26 @@
 
     async function playAudio(arrayBuffer) {
       if (audioContext.state === 'suspended') await audioContext.resume();
-      const int16 = new Int16Array(arrayBuffer);
+
+      let bytes = new Uint8Array(arrayBuffer);
+      if (pendingPcmByte !== null) {
+        const merged = new Uint8Array(bytes.length + 1);
+        merged[0] = pendingPcmByte;
+        merged.set(bytes, 1);
+        bytes = merged;
+        pendingPcmByte = null;
+      }
+
+      if (bytes.length === 0) return;
+
+      if (bytes.length % 2 !== 0) {
+        pendingPcmByte = bytes[bytes.length - 1];
+        bytes = bytes.subarray(0, bytes.length - 1);
+      }
+
+      if (bytes.length === 0) return;
+
+      const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) {
         float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
@@ -122,6 +155,7 @@
     }
 
     function stopPlayback() {
+      pendingPcmByte = null;
       if (workletNode) workletNode.port.postMessage({ clear: true });
     }
 
@@ -196,6 +230,12 @@
           }
           if (msg.Kind === "Transcription") {
             console.log("Transcript:", msg.Text);
+          }
+          if (msg.Kind === "TransferSimulated") {
+            console.log("Transfer simulated:", msg.Department, msg.Status);
+            const panel = document.getElementById("transferPanel");
+            panel.textContent = `Intent detected: ${msg.Department} — Transfer: simulated (${msg.Status})`;
+            panel.style.display = "block";
           }
          }
         else if (event.data instanceof ArrayBuffer) {
