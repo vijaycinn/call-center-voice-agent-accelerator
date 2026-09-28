@@ -120,12 +120,12 @@ def session_config(is_raw_audio=False):
     }
 
     if is_raw_audio:
-        # Web browser path: server VAD with explicit response creation, no server echo cancellation
+        # Web browser path: sensitive server VAD with explicit response creation, no server echo cancellation
         session["turn_detection"] = {
             "type": "server_vad",
-            "threshold": 0.4,
+            "threshold": 0.25,
             "prefix_padding_ms": 300,
-            "silence_duration_ms": 500,
+            "silence_duration_ms": 400,
             "create_response": True,
         }
     else:
@@ -255,6 +255,11 @@ class ACSMediaHandler:
                         session_id = event.get("session", {}).get("id")
                         logger.info("[VoiceLiveACSHandler] Session ID: %s", session_id)
 
+                    case "session.updated":
+                        session_data = event.get("session", {})
+                        logger.info("[VoiceLiveACSHandler] Session updated: model=%s vad=%s",
+                                    session_data.get("model"), session_data.get("turn_detection"))
+
                     case "input_audio_buffer.cleared":
                         logger.info("Input Audio Buffer Cleared Message")
 
@@ -264,13 +269,18 @@ class ACSMediaHandler:
                             event.get("audio_start_ms"),
                         )
                         await self.stop_audio()
+                        await self.send_message(json.dumps({"Kind": "Status", "Text": "Listening..."}))
 
                     case "input_audio_buffer.speech_stopped":
                         logger.info("Speech stopped")
+                        await self.send_message(json.dumps({"Kind": "Status", "Text": "Processing..."}))
 
                     case "conversation.item.input_audio_transcription.completed":
                         transcript = event.get("transcript")
                         logger.info("User: %s", transcript)
+                        await self.send_message(
+                            json.dumps({"Kind": "Transcription", "Text": f"You: {transcript}"})
+                        )
 
                     case "conversation.item.input_audio_transcription.failed":
                         error_msg = event.get("error")
@@ -284,12 +294,17 @@ class ACSMediaHandler:
                                 "Status Details: %s",
                                 json.dumps(response["status_details"], indent=2),
                             )
+                        if not hasattr(self, "_greeting_done"):
+                            self._greeting_done = True
+                            logger.info("[VoiceLiveACSHandler] Initial greeting complete - clearing buffer for user speech")
+                            await self._send_json({"type": "input_audio_buffer.clear"})
+                            await self.send_message(json.dumps({"Kind": "Status", "Text": "Ready - Speak now"}))
 
                     case "response.audio_transcript.done":
                         transcript = event.get("transcript")
                         logger.info("AI: %s", transcript)
                         await self.send_message(
-                            json.dumps({"Kind": "Transcription", "Text": transcript})
+                            json.dumps({"Kind": "Transcription", "Text": f"Agent: {transcript}"})
                         )
 
                         # IVR transfer detection
@@ -326,11 +341,14 @@ class ACSMediaHandler:
                                 await self.voicelive_to_acs(delta)
 
                     case "error":
-                        logger.error("Voice Live Error: %s", event)
+                        logger.error("Voice Live Error: %s", json.dumps(event))
+                        err_obj = event.get("error", {})
+                        err_msg = err_obj.get("message", "Voice Live API error")
+                        await self.send_message(json.dumps({"Kind": "Error", "Text": err_msg}))
 
                     case _:
-                        logger.debug(
-                            "[VoiceLiveACSHandler] Other event: %s", event_type
+                        logger.info(
+                            "[VoiceLiveACSHandler] Voice Live event: %s", event_type
                         )
         except Exception:
             logger.exception("[VoiceLiveACSHandler] Receiver loop error")

@@ -195,9 +195,12 @@
         }
       };
 
-      // ONLY route mic input into the processor
+      // Route through a zero-gain node so the mic isn't echoed back through local speakers
+      const muteNode = audioContext.createGain();
+      muteNode.gain.value = 0;
       source.connect(processor);
-      processor.connect(audioContext.destination); // destination is silent when context's output not used
+      processor.connect(muteNode);
+      muteNode.connect(audioContext.destination);
     }
 
     function stopMicrophone() {
@@ -249,7 +252,19 @@
           if (msg.Kind === "Transcription") {
             console.log("Transcript:", msg.Text);
             const panel = document.getElementById("transferPanel");
-            panel.textContent = `Transcript: ${msg.Text}`;
+            panel.textContent = msg.Text;
+            panel.style.display = "block";
+          }
+          if (msg.Kind === "Status") {
+            console.log("Status:", msg.Text);
+            const panel = document.getElementById("transferPanel");
+            panel.textContent = msg.Text;
+            panel.style.display = "block";
+          }
+          if (msg.Kind === "Error") {
+            console.error("Voice Live Error:", msg.Text);
+            const panel = document.getElementById("transferPanel");
+            panel.textContent = `Error: ${msg.Text}`;
             panel.style.display = "block";
           }
           if (msg.Kind === "TransferSimulated") {
