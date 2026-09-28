@@ -176,14 +176,22 @@
           autoGainControl: true
         }
       });
+      window._mediaStream = mediaStream;
       source = audioContext.createMediaStreamSource(mediaStream);
+      window._source = source;
       processor = audioContext.createScriptProcessor(4096, 1, 1);
+      window._processor = processor;
 
+      let framesCount = 0;
       processor.onaudioprocess = (event) => {
         const input = event.inputBuffer.getChannelData(0);
         const pcm = float32ToInt16(input);
         if (socket?.readyState === WebSocket.OPEN) {
           socket.send(pcm.buffer);
+          framesCount++;
+          if (framesCount === 1 || framesCount % 100 === 0) {
+            console.log(`[Mic] Sent ${framesCount} audio chunks`);
+          }
         }
       };
 
@@ -196,11 +204,14 @@
       if (processor && typeof processor.disconnect === "function") {
         processor.disconnect();
         processor = null;
+        window._processor = null;
       }
       if (mediaStream && mediaStream.getTracks) {
         mediaStream.getTracks().forEach(t => t.stop());
         mediaStream = null;
+        window._mediaStream = null;
       }
+      window._source = null;
     }
 
     function stopStreaming() {
@@ -215,10 +226,17 @@
 
       socket.onopen = async () => {
         console.log("WebSocket opened");
-        await audioContext.resume();
-        await startMicrophone();
-        document.getElementById("startBtn").disabled = true;
-        document.getElementById("stopBtn").disabled = false;
+        try {
+          await audioContext.resume();
+          await startMicrophone();
+          document.getElementById("startBtn").disabled = true;
+          document.getElementById("stopBtn").disabled = false;
+          console.log("Microphone streaming active");
+        } catch (err) {
+          console.error("Microphone startup failed:", err);
+          alert("Microphone error: " + err.message);
+          stopStreaming();
+        }
       };
 
       socket.onmessage = async (event) => {
@@ -230,6 +248,9 @@
           }
           if (msg.Kind === "Transcription") {
             console.log("Transcript:", msg.Text);
+            const panel = document.getElementById("transferPanel");
+            panel.textContent = `Transcript: ${msg.Text}`;
+            panel.style.display = "block";
           }
           if (msg.Kind === "TransferSimulated") {
             console.log("Transfer simulated:", msg.Department, msg.Status);

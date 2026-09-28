@@ -110,7 +110,7 @@ async def acs_ws():
             pass
         if hasattr(handler, "send_task") and handler.send_task and not handler.send_task.done():
             handler.send_task.cancel()
-        if getattr(handler, "ws", None) and not handler.ws.closed:
+        if getattr(handler, "ws", None):
             try:
                 await handler.ws.close()
             except Exception:
@@ -143,7 +143,7 @@ async def web_ws():
             pass
         if hasattr(handler, "send_task") and handler.send_task and not handler.send_task.done():
             handler.send_task.cancel()
-        if getattr(handler, "ws", None) and not handler.ws.closed:
+        if getattr(handler, "ws", None):
             try:
                 await handler.ws.close()
             except Exception:

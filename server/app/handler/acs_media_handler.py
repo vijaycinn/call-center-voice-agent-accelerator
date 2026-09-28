@@ -64,26 +64,86 @@ def session_config():
                 "\"I will transfer you to [Department Name] now.\" "
                 "This phrase triggers the transfer action \u2014 do not vary the wording."
             ),
-            "turn_detection": {
-                "type": "azure_semantic_vad",
-                "threshold": 0.3,
-                "prefix_padding_ms": 200,
-                "silence_duration_ms": 200,
-                "remove_filler_words": False,
-                "end_of_utterance_detection": {
-                    "model": "semantic_detection_v1",
-                    "threshold": 0.01,
-                    "timeout": 2,
-                },
-            },
-            "input_audio_noise_reduction": {"type": "azure_deep_noise_suppression"},
-            "input_audio_echo_cancellation": {"type": "server_echo_cancellation"},
             "voice": {
                 "name": "en-US-Aria:DragonHDLatestNeural",
                 "type": "azure-standard",
                 "temperature": 0.8,
             },
         },
+    }
+
+
+def session_config(is_raw_audio=False):
+    """Returns the session configuration for Voice Live, tailored for web vs telephony."""
+    session = {
+        "instructions": (
+            "You are the County Services IVR assistant. Your job is to greet callers, "
+            "understand who or what department they need, confirm the correct department "
+            "with them, and transfer them.\n\n"
+            "Follow this exact flow:\n"
+            "1. Greet: \"Thank you for calling County Services. I can help direct your call. "
+            "Who or what department are you trying to reach today?\"\n"
+            "2. Listen to the caller and identify the best matching department from this list:\n"
+            "   - Administration (official county records and administrative processes only "
+            "— NOT a general information line)\n"
+            "   - County Executive Office (matters specifically for the County Executive "
+            "— NOT a general county information line)\n"
+            "   - Public Works (roads, potholes, utilities, sanitation, permits)\n"
+            "   - Health Services (clinics, public health, medical assistance)\n"
+            "   - Human Services (social services, benefits, financial assistance)\n"
+            "   - Clerk / Recorder (official records, filing, marriage/birth certificates)\n"
+            "   - Sheriff / Public Safety (law enforcement, non-emergency safety)\n"
+            "3. If the caller's need is unclear, ask one clarifying question: "
+            "\"Can you tell me a little more about what you need help with?\"\n"
+            "4. Confirm: \"I can connect you to [Department Name]. Does that sound right?\"\n"
+            "5. When the caller confirms, say exactly: "
+            "\"I will transfer you to [Department Name] now.\" then stop speaking.\n\n"
+            "Important rules:\n"
+            "- Never route to Administration for general questions or complaints. If a caller "
+            "says \"Administration\" without a clear administrative reason, ask what the issue "
+            "is about before routing there.\n"
+            "- Never route to the County Executive Office for general inquiries. That office "
+            "handles matters specifically directed at the County Executive. If the caller "
+            "sounds like they want general county information, ask what the issue is about.\n"
+            "- If truly ambiguous after one clarification, say: "
+            "\"I will transfer you to the General Operator now.\"\n"
+            "- Always end a confirmed transfer with the exact phrase: "
+            "\"I will transfer you to [Department Name] now.\" "
+            "This phrase triggers the transfer action — do not vary the wording."
+        ),
+        "input_audio_transcription": {"model": "whisper-1"},
+        "voice": {
+            "name": "en-US-Aria:DragonHDLatestNeural",
+            "type": "azure-standard",
+            "temperature": 0.8,
+        },
+    }
+
+    if is_raw_audio:
+        # Web browser path: server VAD with explicit response creation, no server echo cancellation
+        session["turn_detection"] = {
+            "type": "server_vad",
+            "threshold": 0.4,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 500,
+            "create_response": True,
+        }
+    else:
+        # Telephony path (ACS): bidirectional stream with echo cancellation
+        session["turn_detection"] = {
+            "type": "azure_semantic_vad",
+            "threshold": 0.3,
+            "prefix_padding_ms": 200,
+            "silence_duration_ms": 200,
+            "remove_filler_words": False,
+            "create_response": True,
+        }
+        session["input_audio_noise_reduction"] = {"type": "azure_deep_noise_suppression"}
+        session["input_audio_echo_cancellation"] = {"type": "server_echo_cancellation"}
+
+    return {
+        "type": "session.update",
+        "session": session,
     }
 
 
@@ -151,7 +211,7 @@ class ACSMediaHandler:
         self.ws = await ws_connect(url, additional_headers=headers)
         logger.info("[VoiceLiveACSHandler] Connected to Voice Live API")
 
-        await self._send_json(session_config())
+        await self._send_json(session_config(is_raw_audio=self.is_raw_audio))
         await self._send_json({"type": "response.create"})
 
         asyncio.create_task(self._receiver_loop())
@@ -469,6 +529,13 @@ class ACSMediaHandler:
         """Encodes raw audio bytes and sends to Voice Live API."""
         chunk_size = len(audio_bytes)
         
+        if not hasattr(self, "_web_frames_count"):
+            self._web_frames_count = 0
+            logger.info("[VoiceLiveACSHandler] Started receiving audio from web client: first chunk=%d bytes", chunk_size)
+        self._web_frames_count += 1
+        if self._web_frames_count % 100 == 0:
+            logger.info("[VoiceLiveACSHandler] Received %d audio chunks from web client", self._web_frames_count)
+
         # Send continuous audio back to browser (ambient + TTS mixed)
         await self._send_continuous_audio(chunk_size)
         
